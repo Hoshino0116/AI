@@ -98,9 +98,9 @@ class ResidualBottleneckBlock(nn.Module):
           #output = out + self.shortcut(x)
           return F.relu(output)
 #[3,4,6,3]
-class HoshiryuNet(nn.Module):
+class Net(nn.Module):
   def __init__(self):
-      super(HoshiryuNet,self).__init__()
+      super(Net,self).__init__()
 
       self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,bias=False)
       self.bn1 = nn.BatchNorm2d(64)
@@ -164,7 +164,7 @@ test_loader = DataLoader(test_data,batch_size=batch_size,shuffle=False)
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
-net = HoshiryuNet().to(device)
+net = Net().to(device)
 net.weight_initializer()
 
 criterion = nn.CrossEntropyLoss()
