@@ -1,191 +1,171 @@
 import torch
-import random
 import numpy as np
 import pandas as pd
 import torch.nn as nn
 from torch import optim
 import torch.nn.functional as F
-from torch.autograd import Variable
 import torch.nn.init as init
-
+import torchvision
 import torchvision.transforms as transforms
 from torchvision import models
 from torch.utils.data import Dataset,DataLoader
 from torch.utils.data.dataset import Subset
 import torchvision.datasets as dsets
-
 import os
 import sys
-from skimage import io
-from skimage import color
-from skimage.transform import rescale
-
-from PIL import Image
-
 import matplotlib.pyplot as plt
-
 import random
 
 class ShakeShake(torch.autograd.Function):
   @staticmethod
-  def forward(ctx, i1, i2):
+  def forward(ctx,i1,i2):
     alpha = random.random()
     result = i1 * alpha + i2 * (1-alpha)
-
     return result
   @staticmethod
-  def backward(ctx, grad_output):
-    beta  = random.random()
-
+  def backward(ctx,grad_output):
+    beta = random.random()
     return grad_output * beta, grad_output * (1-beta)
 
-class ResidualBottleneckBlock(nn.Module):
-    expansion = 4
+class ResidualPlainBlock(nn.Module):
 
-    def __init__(self, in_channels, out_channels, stride):
-        super(ResidualBottleneckBlock, self).__init__()
+    def __init__(self, in_channels, out_channels, stride, padding=0):
+        super(ResidualPlainBlock, self).__init__()
 
-        bottleneck_channels = out_channels // self.expansion
+        self.in_channels = in_channels
+        self.out_channels = out_channels
 
-        self.conv1 = nn.Conv2d(in_channels,  bottleneck_channels, kernel_size=1,  stride=1, padding=0, bias=False)
-        self.bn1 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv1 = nn.Conv2d(in_channels,  out_channels, kernel_size=3,  stride=stride, padding=1)
+        self.bn1 = nn.BatchNorm2d(out_channels)
 
-        self.conv2 = nn.Conv2d(bottleneck_channels, bottleneck_channels,  kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv2 = nn.Conv2d(out_channels, out_channels,  kernel_size=3, stride=1, padding=1)
+        self.bn2 = nn.BatchNorm2d(out_channels)
 
-        self.conv3 = nn.Conv2d(bottleneck_channels, out_channels, kernel_size=1, stride=1, padding=0,  bias=False)
-        self.bn3 = nn.BatchNorm2d(out_channels)
+        self.conv1_2 = nn.Conv2d(in_channels,  out_channels, kernel_size=3,  stride=stride, padding=1)
+        self.bn1_2 = nn.BatchNorm2d(out_channels)
 
-        self.conv1_2 = nn.Conv2d(in_channels,  bottleneck_channels, kernel_size=1,  stride=1, padding=0, bias=False)
-        self.bn1_2 = nn.BatchNorm2d(bottleneck_channels)
+        self.conv2_2 = nn.Conv2d(out_channels, out_channels,  kernel_size=3, stride=1, padding=1)
+        self.bn2_2 = nn.BatchNorm2d(out_channels)
 
-        self.conv2_2 = nn.Conv2d(bottleneck_channels, bottleneck_channels,  kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn2_2 = nn.BatchNorm2d(bottleneck_channels)
+        self.identity = nn.Identity()
 
-        self.conv3_2 = nn.Conv2d(bottleneck_channels, out_channels, kernel_size=1, stride=1, padding=0,  bias=False)
-        self.bn3_2 = nn.BatchNorm2d(out_channels)
+        if in_channels != out_channels:
+          self.down_avg1 = nn.AvgPool2d(kernel_size=1, stride=1)
+          self.down_conv1 = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=stride, padding=0)
+          self.down_pad1 = nn.ZeroPad2d((1,0,1,0))
+          self.down_avg2 = nn.AvgPool2d(kernel_size=1, stride=1)
+          self.down_conv2 = nn.Conv2d(in_channels, in_channels, kernel_size=1, stride=stride, padding=0)
 
-        self.shortcut = nn.Sequential()   # identity mapping
-        if in_channels != out_channels:   # downsampling
-            self.shortcut.add_module('conv',  nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0, bias=False))
-            self.shortcut.add_module('bn', nn.BatchNorm2d(out_channels))
+    #down sampling時の処理が特殊 
+    def shortcut(self,x):
+      x = F.relu(x)
+      h1 = self.down_avg1(x)
+      h1 = self.down_conv1(h1)
+      h2 = self.down_pad1(x[:,:,1:,1:])
+      h2 = self.down_avg1(h2)
+      h2 = self.down_conv2(h2)
+      return torch.cat((h1,h2),axis=1)
+
 
     def forward(self, x):
       if self.training:
-          out = F.relu(self.bn1(self.conv1(x)))
-          out = F.relu(self.bn2(self.conv2(out)))
-          out = self.bn3(self.conv3(out))
+        #1つ目のResdual Block
+          out = self.bn1(self.conv1(F.relu(x)))
+          out = self.bn2(self.conv2(F.relu(out)))
           
-          out2 = F.relu(self.bn1_2(self.conv1_2(x)))
-          out2 = F.relu(self.bn2_2(self.conv2_2(out2)))
-          out2 = self.bn3_2(self.conv3_2(out2))
+        #2つ目のResidual Block
+          out2 = self.bn1_2(self.conv1_2(F.relu(x)))
+          out2 = self.bn2_2(self.conv2_2(F.relu(out2)))
 
-          output = self.shortcut(x) + ShakeShake.apply(out,out2)
+          if self.in_channels != self.out_channels:
+            output = self.shortcut(x) + ShakeShake.apply(out,out2)
+          else:
+            output = self.identity(x) + ShakeShake.apply(out,out2)
           
-          #output = out + self.shortcut(x)
-          return F.relu(output)
+          return output
       else:
-          out = F.relu(self.bn1(self.conv1(x)), inplace=True)
-          out = F.relu(self.bn2(self.conv2(out)), inplace=True)
-          out = self.bn3(self.conv3(out))
+          out = self.bn1(self.conv1(F.relu(x)))
+          out = self.bn2(self.conv2(F.relu(out)))
           
-          out2 = F.relu(self.bn1_2(self.conv1_2(x)), inplace=True)
-          out2 = F.relu(self.bn2_2(self.conv2_2(out2)), inplace=True)
-          out2 = self.bn3_2(self.conv3_2(out2))
+          out2 = self.bn1_2(self.conv1_2(F.relu(x)))
+          out2 = self.bn2_2(self.conv2_2(F.relu(out2)))
 
-          output = self.shortcut(x) + out*0.5 + out2*0.5
+          if self.in_channels != self.out_channels:
+            output = self.shortcut(x) + (out+out2)*0.5
+          else:
+            output = self.identity(x) + (out+out2)*0.5
           
-          #output = out + self.shortcut(x)
-          return F.relu(output)
+          return output
+
 #[3,4,6,3]
-class Net(nn.Module):
+class MyNet(nn.Module):
   def __init__(self):
-      super(Net,self).__init__()
+      super(MyNet,self).__init__()
 
-      self.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=2, padding=3,bias=False)
-      self.bn1 = nn.BatchNorm2d(64)
-      self.relu = nn.ReLU(inplace=True)
-      self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
+      self.conv1 = nn.Conv2d(3, 16, kernel_size=3, stride=1, padding=1)
 
       self.layer1 = nn.Sequential(
-        ResidualBottleneckBlock(64,64,1),
-        ResidualBottleneckBlock(64,64,1),
-        ResidualBottleneckBlock(64,64,1)
+        ResidualPlainBlock(16,32,1),
+        ResidualPlainBlock(32,32,1),
+        ResidualPlainBlock(32,32,1),
+        ResidualPlainBlock(32,32,1)
       )
       self.layer2 = nn.Sequential(
-        ResidualBottleneckBlock(64,128,2),
-        ResidualBottleneckBlock(128,128,1),
-        ResidualBottleneckBlock(128,128,1),
-        ResidualBottleneckBlock(128,128,1)
+        ResidualPlainBlock(32,64,2),
+        ResidualPlainBlock(64,64,1),
+        ResidualPlainBlock(64,64,1),
+        ResidualPlainBlock(64,64,1)
         )
       self.layer3 = nn.Sequential(
-        ResidualBottleneckBlock(128,256,2),
-        ResidualBottleneckBlock(256,256,1),
-        ResidualBottleneckBlock(256,256,1),
-        ResidualBottleneckBlock(256,256,1),
-        ResidualBottleneckBlock(256,256,1),
-        ResidualBottleneckBlock(256,256,1)
+        ResidualPlainBlock(64,128,2),
+        ResidualPlainBlock(128,128,1),
+        ResidualPlainBlock(128,128,1),
+        ResidualPlainBlock(128,128,1),
         )
-      self.layer4 = nn.Sequential(
-        ResidualBottleneckBlock(256,512,2),
-        ResidualBottleneckBlock(512,512,1),
-        ResidualBottleneckBlock(512,512,1)
-        )
-
-      self.avgpool = nn.AdaptiveAvgPool2d((2, 2))
-      self.fc = nn.Linear(512 * 4, 10)
+      self.avgpool = nn.MaxPool2d(kernel_size=8, stride=2, padding=1)
+      self.fc = nn.Linear(128*4, 10)
 
   def forward(self,x):
     x = self.conv1(x)
-    x = self.bn1(x)
-    x = self.relu(x)
-    x = self.maxpool(x)
     x = self.layer1(x)
     x = self.layer2(x)
     x = self.layer3(x)
-    x = self.layer4(x)
     x = self.avgpool(x)
-    x = x.view(-1,512*4)
+    x = x.view(-1,128*4)
+    x = F.dropout(x,training=self.training)
     x = self.fc(x)
     return x
-  def weight_initializer(self):
-    for m in self.modules():
-        if isinstance(m,nn.Conv2d):
-           init.kaiming_uniform_(m.weight.data,nonlinearity='relu')
 
 
 #画像の読み込み
-batch_size = 100
-train_data = dsets.CIFAR10(root='./tmp/cifar-10', train=True, download=False, transform=transforms.Compose([transforms.RandomHorizontalFlip(p=0.5), transforms.ToTensor(),transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]), transforms.RandomErasing(p=0.5, scale=(0.02, 0.33), ratio=(0.3, 3.3), value=0, inplace=False)]))
+batch_size = 128
+train_data = dsets.CIFAR10(root='./tmp/cifar-10', train=True, download=False, transform=transforms.Compose([transforms.RandomHorizontalFlip(p=0.5),transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]) ]))
 train_loader = DataLoader(train_data,batch_size=batch_size,shuffle=True)
-test_data = dsets.CIFAR10(root='./tmp/cifar-10', train=False, download=False, transform=transforms.Compose([transforms.ToTensor(),transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])]))
+test_data = dsets.CIFAR10(root='./tmp/cifar-10', train=False, download=False, transform=transforms.Compose([transforms.RandomHorizontalFlip(p=0.5), transforms.ToTensor(), transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5]) ]))
 test_loader = DataLoader(test_data,batch_size=batch_size,shuffle=False)
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print(device)
 
-net = Net().to(device)
-net.weight_initializer()
+net = MyNet().to(device)
 
 criterion = nn.CrossEntropyLoss()
 
-
-learning_rate = 0.01
-optimizer = optim.SGD(net.parameters(),lr=learning_rate,momentum=0.9,weight_decay=0.00005)
-scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[650], gamma=0.1)
+learning_rate = 0.02
+optimizer = optim.SGD(net.parameters(),lr=learning_rate,momentum=0.9,weight_decay=0.0001)
+scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=50, eta_min=0.001)
 
 loss = 0
-loss100 = 0
-count = 0
-acc_list = []
-loss_list = []
+correct = 0
+train_list = []
+test_list = []
 max_acc = 0
 
 #訓練・推論
-for i in range(1000):
+for i in range(200):
   
   net.train()
-  
+
   for j,data in enumerate(train_loader,0):
     optimizer.zero_grad()
     inputs,labels = data
@@ -200,28 +180,23 @@ for i in range(1000):
     loss.backward()
     optimizer.step()
 
-    scheduler.step()
-
-    loss100 += loss
-    count += 1
     print('%d: %.3f'%(j+1,loss))
 
-  print('%depoch:mean_loss=%.3f\n'%(i+1,loss100/count))
-  loss_list.append(loss100/count)
+    _,predicted = torch.max(outputs.data,1)
 
-  loss100 = 0
-  count = 0
+    correct += (predicted == labels).sum()
+
+  accuracy = 100.*correct / 50000
+  print('\nepoch:%d Train Accuracy(%d/50000):%.2f'%(i+1,correct,accuracy))
+  train_list.append(accuracy)
+
   correct = 0
-  total = 0
   accuracy = 0.0
   net.eval()
  
   for j,data in enumerate(test_loader,0):
 
     inputs,labels = data
-
-    param = torch.load('Weight'+str(i+1))
-    net.load_state_dict(param)
 
     inputs = inputs.to(device)
     labels = labels.to(device)
@@ -231,18 +206,20 @@ for i in range(1000):
     _,predicted = torch.max(outputs.data,1)
 
     correct += (predicted == labels).sum()
-    total += batch_size
 
-  accuracy = 100.*correct / total
-  acc_list.append(accuracy)
+  accuracy = 100.*correct / 10000
+  test_list.append(accuracy)
 
-  print('epoch:%d Accuracy(%d/%d):%f'%(i+1,correct,total,accuracy))
-  torch.save(net.state_dict(),'Weight'+str(909+i+1))
+  print('epoch:%d Test Accuracy(%d/10000):%.2f\n'%(i+1,correct,accuracy))
+  torch.save(net.state_dict(),'Weight'+str(i+1))
 
-for i in range(len(acc_list)):
-  print('epoch:%d Accuracy:%.3f'%(i+1,acc_list[i]))
+  scheduler.step()
+  correct = 0
 
-plt.plot(acc_list)
-plt.show(acc_list)
-plt.plot(loss_list)
-plt.show(loss_list)
+for i in range(len(test_list)):
+  print('epoch:%d Accuracy:%.3f'%(i+1,test_list[i]))
+print('max accuracy = %.3f'%(max(test_list)))
+
+plt.plot(train_list,marker='x', label='train_acc')
+plt.plot(test_list,marker='o', label='test_acc')
+plt.show()
